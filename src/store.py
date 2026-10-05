@@ -53,7 +53,20 @@ class EmbeddingStore:
         For ChromaDB: use collection.add(ids=[...], documents=[...], embeddings=[...])
         For in-memory: append dicts to self._store
         """
-        self._store.extend(self._make_record(doc) for doc in docs)
+        if not docs:
+            return
+        if hasattr(self._embedding_fn, "embed_batch"):
+            embeddings = self._embedding_fn.embed_batch([d.content for d in docs])
+            for doc, emb in zip(docs, embeddings):
+                self._next_index += 1
+                self._store.append({
+                    "id": f"{doc.id}#{self._next_index}",
+                    "content": doc.content,
+                    "metadata": {**doc.metadata, "doc_id": doc.metadata.get("doc_id", doc.id)},
+                    "embedding": emb,
+                })
+        else:
+            self._store.extend(self._make_record(doc) for doc in docs)
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import time
 from dataclasses import dataclass, fields
 from typing import Any
@@ -138,8 +139,15 @@ class MeteredLLM:
                         )
                     break
                 except Exception as e:
-                    if attempt < 4 and any(code in str(e) for code in ("503", "429", "UNAVAILABLE", "high demand")):
-                        time.sleep(2 * (attempt + 1))
+                    err_str = str(e)
+                    if attempt < 5 and any(code in err_str for code in ("503", "429", "UNAVAILABLE", "high demand", "Resource has been exhausted", "rate limit")):
+                        delay = 5 * (attempt + 1)
+                        match = re.search(r"retryDelay':\s*'(\d+)", err_str)
+                        if match:
+                            delay = max(delay, float(match.group(1)) + 1)
+                        if delay > 30:
+                            raise
+                        time.sleep(delay)
                         continue
                     raise
             text, model = response.choices[0].message.content or "", self.chat_model_id
@@ -166,11 +174,35 @@ class MeteredLLM:
             text = "".join(block.text for block in response.content if block.type == "text")
         return text, response.model, response.usage.input_tokens, response.usage.output_tokens
 
-    def embed(self, text: str) -> list[float]:
+    def embed_batch(self, texts: list[str], batch_size: int = 50) -> list[list[float]]:
         start = time.perf_counter()
-        response = self._embed_client.embeddings.create(model=self.embed_model_id, input=text)
-        tokens = getattr(response.usage, "prompt_tokens", 0) or 0   # some OpenAI-compatible APIs omit usage
-        self.usage += Usage(1, tokens, 0, price(self.embed_model_id, tokens), time.perf_counter() - start)
-        return [float(value) for value in response.data[0].embedding]
+        results: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            for attempt in range(6):
+                try:
+                    response = self._embed_client.embeddings.create(model=self.embed_model_id, input=batch)
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if attempt < 5 and any(code in err_str for code in ("429", "503", "UNAVAILABLE", "Resource has been exhausted", "rate limit")):
+                        delay = 5 * (attempt + 1)
+                        match = re.search(r"retryDelay':\s*'(\d+)", err_str)
+                        if match:
+                            delay = max(delay, float(match.group(1)) + 1)
+                        time.sleep(delay)
+                        continue
+                    raise
+            tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+            self.usage += Usage(1, tokens, 0, price(self.embed_model_id, tokens), time.perf_counter() - start)
+            data_sorted = sorted(response.data, key=lambda d: getattr(d, 'index', 0))
+            for item in data_sorted:
+                results.append([float(val) for val in item.embedding])
+        return results
+
+    def embed(self, text: str | list[str]) -> list[float] | list[list[float]]:
+        if isinstance(text, list):
+            return self.embed_batch(text)
+        return self.embed_batch([text])[0]
 
     __call__ = embed
