@@ -23,7 +23,7 @@ PROVIDERS = {
     "openrouter": {"key": "OPENROUTER_API_KEY", "base_url": "https://openrouter.ai/api/v1",
                    "chat": "openai/gpt-4o-mini", "embed": "openai/text-embedding-3-small"},
     "gemini": {"key": "GEMINI_API_KEY", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-               "chat": "gemini-2.5-flash-lite", "embed": "gemini-embedding-001"},
+               "chat": "gemini-flash-latest", "embed": "gemini-embedding-001"},
     "anthropic": {"key": "ANTHROPIC_API_KEY", "base_url": None,
                   "chat": "claude-opus-5-5", "embed": None},
 }
@@ -37,6 +37,8 @@ PRICES_PER_M = {
     "text-embedding-3-small": (0.02, 0.0),
     "text-embedding-3-large": (0.13, 0.0),
     "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-3.8-flash": (0.10, 0.40),
+    "gemini-flash-latest": (0.10, 0.40),
     # Gemini embedding pricing intentionally omitted: the current pricing page does not list gemini-embedding-001.
     "claude-opus-5-5": (4.00, 20.00),
     "claude-sonnet-5-5": (2.00, 10.00),
@@ -119,19 +121,27 @@ class MeteredLLM:
         if self.chat_provider == "anthropic":
             text, model, tokens_in, tokens_out = self._chat_anthropic(prompt)
         else:
-            if json_mode and self.chat_provider != "gemini":
-                response = self._chat_client.chat.completions.create(
-                    model=self.chat_model_id,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    response_format={"type": "json_object"},
-                )
-            else:
-                response = self._chat_client.chat.completions.create(
-                    model=self.chat_model_id,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                )
+            for attempt in range(5):
+                try:
+                    if json_mode and self.chat_provider != "gemini":
+                        response = self._chat_client.chat.completions.create(
+                            model=self.chat_model_id,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0,
+                            response_format={"type": "json_object"},
+                        )
+                    else:
+                        response = self._chat_client.chat.completions.create(
+                            model=self.chat_model_id,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0,
+                        )
+                    break
+                except Exception as e:
+                    if attempt < 4 and any(code in str(e) for code in ("503", "429", "UNAVAILABLE", "high demand")):
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    raise
             text, model = response.choices[0].message.content or "", self.chat_model_id
             usage = response.usage
             tokens_in = usage.prompt_tokens if usage else 0
